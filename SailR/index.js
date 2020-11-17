@@ -1,6 +1,6 @@
 const express = require('express')
 const app = express()
-const port = 80
+const port = process.env.PORT || 2020
 
 // Statics
 app.use('/static',express.static(__dirname + '/static'));
