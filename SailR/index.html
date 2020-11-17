@@ -66,6 +66,9 @@
     <!-- add Leafleet sidebar -->
     <link rel="stylesheet" href="static/leaflet-sidebar/src/L.Control.Sidebar.css" />
     <script src="static/leaflet-sidebar/src/L.Control.Sidebar.js"></script>
+    <!-- add Cesium 3D map -->
+    <script src="https://cesiumjs.org/releases/1.75/Build/Cesium/Cesium.js"></script>
+    <link href="https://cesiumjs.org/releases/1.75/Build/Cesium/Widgets/widgets.css" rel="stylesheet">
     <!--for timeslider-->
     <script type="text/javascript" src="static/timedimension/iso8601.min.js"></script>
     <script type="text/javascript" src="static/timedimension/leaflet.timedimension.noLayers.src.js"></script>
@@ -97,7 +100,8 @@
       <div class="container txtheader">Cartographie non officielle du <span class="blue">Vendée-Globe 2020/2021</span> - <a target="_blank" href="https://github.com/volodiaja/race_tracker/">Github</a></div>
       </div>
       
-      <div id="map"></div>
+      <div id="map" style="display:none;"></div>
+      <div id="cesiumMap"></div>
       
       <div id="footer" class="black-container">
         <div class="container chronodata">
@@ -393,6 +397,27 @@
         };
       }
 
+      // Set 3D map
+      const viewer = new Cesium.Viewer('cesiumMap', {
+        // Remove default button
+        animation:false,
+        homeButton:false,
+        sceneModePicker:false,
+        navigationHelpButton:false,
+        baseLayerPicker: false,
+        navigationInstructionsInitiallyVisible: false,
+        // Remove stars background
+        skyBox:false,
+        // Remove geocoder search
+        geocoder:false,
+        // Hide the timeline
+        //timeline:false,
+        // Switch to request render mode for performances reasons
+        requestRenderMode:true,
+        terrainProvider: Cesium.createWorldTerrain()
+      });
+      
+
       // Set map
       var map = L.map(
         'map',
@@ -480,6 +505,7 @@
           wind10mLayerGroup.clearLayers();
           wind10mName = wind10mBaseName.replace(/{h}/g, (actualTimeIndex - baseIndex) * actualInterval);
           
+          // https://weather.openportguide.org/weather/wind10m/wind10m_0h.json
           $.getJSON(wind10mBaseURL + wind10mName + ".json", function(data) {
             this[wind10mName] = L.velocityLayer({
                 displayValues: true,
@@ -505,6 +531,14 @@
           });
         }
 
+        // Add wind layer to 3D map
+        // var weatherLayer = new Cesium.UrlTemplateImageryProvider({
+        //   //url : 'http://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}.png',
+        //   url:'https://weather.openportguide.de/tiles/actual/wind_stream/0h/{z}/{x}/{y}.png',
+        //   credit : 'Map tiles by CartoDB, under CC BY 3.0. Data by OpenStreetMap, under ODbL.'
+        // });
+        // viewer.scene.imageryLayers.addImageryProvider(weatherLayer);
+
         window.setInterval(function() { //check if time index changed
           if (actualTimeIndex != map.timeDimension._currentTimeIndex) {
           actualTimeIndex = map.timeDimension._currentTimeIndex;
@@ -521,17 +555,50 @@
         // ------- DST DATA ------ //
         $.getJSON( "dst.json"+"?"+Math.random(), function( data ) {
           L.polygon(data, {color: "red", weight: 1}).addTo(map);
+
+          $.each(data, function(index,zone){
+            var dstArray = [];
+            $.each(zone,function(index,pt){
+              // Inversion Lat/Lon
+              dstArray.push(pt[1]);
+              dstArray.push(pt[0]);
+            })
+            // Build polygon
+            var dstZone = viewer.entities.add({
+              name: "DST",
+              polygon: {
+                hierarchy: Cesium.Cartesian3.fromDegreesArray(dstArray),
+                material: Cesium.Color.RED,
+              },
+            });
+          });
         }); 
 		
 		    // ------- AEZ DATA ------ //
         $.getJSON( "aez.json"+"?"+Math.random(), function( data ) {
           var aez=[];
+          var aezArray = [];
           //Inversion Lat/Lon
           $.each(data, function(index,value){
-          
-          aez.push([value[1],value[0]]);
+            aez.push([value[1],value[0]]);
+            aezArray.push(value[0]);
+            aezArray.push(value[1]);
           });
           L.polyline(aez, {color: "red", weight: 1}).addTo(map);
+
+          // Build polygon
+          var dstZone = viewer.entities.add({
+            name: "Zone des glaces",
+            polygon: {
+              hierarchy: Cesium.Cartesian3.fromDegreesArray(aezArray),
+              material: new Cesium.StripeMaterialProperty({
+                orientation:Cesium.StripeOrientation.VERTICAL,
+                evenColor: Cesium.Color.RED.withAlpha(0.5),
+                oddColor: Cesium.Color.WHITE.withAlpha(0.0),
+                repeat: 360.0,
+              })
+            },
+          });
         }); 
 		
         // ------ SIDEBAR ----- //
@@ -559,6 +626,10 @@
             var lastPosition = null;
             var lastRotation = null;
             var lastClassement = null;
+
+            // 3D Trace ---
+            var positionProperty = new Cesium.SampledPositionProperty();
+            var orientationProperty = new Cesium.SampledProperty(Number);
           
             // --- TRACE ---- //
             $.each( val.classements, function( elemK, elemV ) {
@@ -566,6 +637,12 @@
               lastRotation = elemV.cap;
               latlngs.push(lastPosition);
               lastClassement = elemV;
+
+              const date = Cesium.JulianDate.fromIso8601(elemV.Date);
+              const position = Cesium.Cartesian3.fromDegrees(Number(elemV.longitude),Number(elemV.latitude),0.0);
+
+              positionProperty.addSample(date, position);
+              orientationProperty.addSample(date,Number(val.cap));
             });
 
             latlngs.reverse();
@@ -631,8 +708,39 @@
           });
                     
           boatPositions.push(lastPosition);
-        });
 
+          // 3D Map ---
+          const start = Cesium.JulianDate.fromIso8601(val.classements[0].Date);
+          const stop = Cesium.JulianDate.fromIso8601(val.classements[val.classements.length-1].Date);
+          viewer.clock.startTime = start.clone();
+          viewer.clock.stopTime = stop.clone();
+          viewer.clock.currentTime = stop.clone();
+          viewer.timeline.zoomTo(start, stop);
+          
+          // Entity
+          var boatEntity = new Cesium.Entity({
+            name:val.bateau,
+            availability:new Cesium.TimeIntervalCollection([ new Cesium.TimeInterval({ start: start, stop: stop }) ]),
+            position:positionProperty,
+            point:{
+              pixelSize:10,
+              color: Cesium.Color.fromCssColorString(val.couleur)
+            },
+            billboard:{
+              image:'static/img/markers/' + key + '.png',
+              width:width/1.5, 
+              height:height/1.5,
+              rotation:-(val.classements[val.classements.length-1].cap/Cesium.Math.DEGREES_PER_RADIAN)
+            },
+            path: new Cesium.PathGraphics({
+              width:2,
+              resolution:3600,
+              material:Cesium.Color.fromCssColorString(val.couleur)
+            })
+          });
+
+          viewer.entities.add(boatEntity);
+        });
 
 
           // add Groups to map
